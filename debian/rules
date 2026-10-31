@@ -23,8 +23,13 @@ PREFIX           := /opt/$(PROJECT_ID)
 INSTALL_ROOT     := $(PKGDIR)$(PREFIX)
 LIBFPRINT_DST    := $(INSTALL_ROOT)/libfprint
 FPRINTD_DST      := $(INSTALL_ROOT)/fprintd
-DROPIN_DIR       := $(PKGDIR)/etc/systemd/system/fprintd.service.d
-UDEV_RULE_DST    := $(PKGDIR)/etc/udev/rules.d/70-libfprint-2.rules
+# The three generated configuration files are shipped as templates in
+# /usr/share and copied into /etc by postinst, so that they are not conffiles
+# (see the note near the end of this file).
+TEMPLATES        := $(PKGDIR)/usr/share/$(PKG)
+DROPIN_LIB       := $(TEMPLATES)/20-goodix-spi-libfprint.conf
+DROPIN_ADAPTIVE  := $(TEMPLATES)/30-goodix-spi-adaptive.conf
+UDEV_RULE        := $(TEMPLATES)/70-libfprint-2.rules
 
 # --- build tree (removed by override_dh_clean) -----------------------------
 WORK             := $(CURDIR)/debian/build
@@ -142,7 +147,7 @@ ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
 endif
 
 override_dh_auto_install:
-	install -d $(LIBFPRINT_DST) $(FPRINTD_DST) $(DROPIN_DIR) $(PKGDIR)/etc/udev/rules.d
+	install -d $(LIBFPRINT_DST) $(FPRINTD_DST) $(TEMPLATES)
 
 	# install.sh:376-378 -- real ->versioned shared object plus the two
 	# conventional symlinks.  The directory is /opt, not /usr/lib.
@@ -155,17 +160,18 @@ override_dh_auto_install:
 	# scripts/build-install-fprintd.sh -- the shadow daemon.
 	install -m 0755 $(FPRINTD_BIN) $(FPRINTD_DST)/fprintd
 
-# install.sh:393 -- the udev rule is installed under /etc so that it shadows
-# the distribution copy of the same name in /usr/lib/udev/rules.d.  install.sh
-# writes it through install_owned_file(), and postrm relies on that first-line
-# ownership marker to decide whether the file may be removed.
+# install.sh:393 -- the rule must end up in /etc so that it shadows the
+# distribution copy of the same name in /usr/lib/udev/rules.d; postinst does
+# that copy.  install.sh writes it through install_owned_file(), and postrm
+# relies on that first-line ownership marker to decide whether the file may be
+# removed, so the marker is part of the generated template.
 	@set -e; \
 	mkdir -p $(WORK); \
 	{ \
 	  printf '%s\n' "# Managed by $(PROJECT_ID); do not edit."; \
 	  cat $(LIBFPRINT_UDEV); \
 	} > $(WORK)/70-libfprint-2.rules; \
-	install -m 0644 $(WORK)/70-libfprint-2.rules $(UDEV_RULE_DST)
+	install -m 0644 $(WORK)/70-libfprint-2.rules $(UDEV_RULE)
 
 	# install.sh:380-392 -- compose the LD_LIBRARY_PATH drop-in from the
 	# device hook instead of duplicating its content here.  A scrubbed
@@ -180,8 +186,8 @@ override_dh_auto_install:
 	  printf '[Service]\n'; \
 	  printf 'Environment=LD_LIBRARY_PATH=$(PREFIX)/libfprint\n'; \
 	  cat $$emit; \
-	} > $(DROPIN_DIR)/20-goodix-spi-libfprint.conf
-	chmod 0644 $(DROPIN_DIR)/20-goodix-spi-libfprint.conf
+	} > $(DROPIN_LIB)
+	chmod 0644 $(DROPIN_LIB)
 
 	# scripts/build-install-fprintd.sh -- ExecStart replacement, the library
 	# path and the warm-session opt-in.  The driver list comes from the device
@@ -197,8 +203,8 @@ override_dh_auto_install:
 	  printf 'Environment=LD_LIBRARY_PATH=$(PREFIX)/libfprint\n'; \
 	  printf 'Environment=FPRINTD_KEEP_WARM_DRIVERS=%s\n' "$$drivers"; \
 	  printf 'Environment=GDIX51C0_WARM_SESSION=1\n'; \
-	} > $(DROPIN_DIR)/30-goodix-spi-adaptive.conf
-	chmod 0644 $(DROPIN_DIR)/30-goodix-spi-adaptive.conf
+	} > $(DROPIN_ADAPTIVE)
+	chmod 0644 $(DROPIN_ADAPTIVE)
 
 # The shadow libfprint must stay invisible to the dynamic linker database.
 # Without this, dh_makeshlibs ships a "libfprint-2 2 libfprint-goodix-spi"
@@ -209,9 +215,30 @@ override_dh_makeshlibs:
 
 # dpkg-shlibdeps must resolve libfprint-2.so.2 against the private directory;
 # it is provided by this package itself, so no inter-package dependency may be
-# derived from it.
+# derived from it.  -x is needed on top of --ignore-missing-info: as soon as
+# the build host happens to have the distribution libfprint installed (likely,
+# since this package is built by people who want to use fprintd), the SONAME
+# resolves to libfprint-2-2 through its symbols file and a spurious hard
+# dependency is generated - even though the file that is linked against is the
+# one in $(LIBFPRINT_DST).  Excluding the package keeps the build independent
+# of what the build host has installed.
 override_dh_shlibdeps:
-	dh_shlibdeps -- --ignore-missing-info -l$(LIBFPRINT_DST)
+	dh_shlibdeps -- --ignore-missing-info -xlibfprint-2-2 -l$(LIBFPRINT_DST)
+
+# The three generated configuration files are shipped as templates below
+# /usr/share and copied into /etc by postinst, instead of being installed into
+# /etc by dpkg.  Conffile semantics are actively wrong for them:
+#   * on removal dpkg keeps conffiles, but a kept drop-in would point
+#     fprintd.service at $(PREFIX)/fprintd/fprintd, which no longer exists, and
+#     fprintd would fail to start for every user of the machine;
+#   * deleting it from postrm instead makes dpkg record it as "removed by the
+#     administrator", and dpkg then does not restore it on a later install
+#     (only --force-confmiss would), leaving an installed-but-inert package -
+#     reproduced, and the reason for this layout.
+# Templates have exactly the wanted behaviour: they live in /usr/share, postinst
+# rewrites the /etc copy on every configure (so a stale driver list cannot
+# survive an upgrade), postrm removes it when the package goes away, and a
+# reinstall always gets a fresh copy.
 
 override_dh_clean:
 	dh_clean

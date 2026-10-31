@@ -1,11 +1,13 @@
 #!/bin/sh
 # postrm script for libfprint-goodix-spi
 #
-# The systemd drop-ins and the udev rule live in /etc and are therefore
-# conffiles: dpkg keeps them on "remove".  That would leave fprintd.service
-# with an ExecStart pointing at a deleted shadow daemon, so the files are
-# removed here, guarded by the ownership marker that upstream install.sh writes
-# as the first line of every file it manages.
+# The systemd drop-ins and the udev rule are ordinary files (see the
+# override_dh_installdeb comment in debian/rules), so dpkg removes them
+# together with the package.  This block therefore only handles files that
+# dpkg does not own: ones left behind by a previous ./install.sh run, which
+# writes the same ownership marker as the first line of every file it manages.
+# They have to go as well, otherwise fprintd.service keeps an ExecStart
+# pointing at a shadow daemon that no longer exists.
 set -e
 
 #DEBHELPER#

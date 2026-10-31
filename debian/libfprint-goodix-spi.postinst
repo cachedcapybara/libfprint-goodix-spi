@@ -1,18 +1,49 @@
 #!/bin/sh
 # postinst script for libfprint-goodix-spi
 #
-# Mirrors the last steps of upstream install.sh (udevadm reload/trigger and
-# "systemctl daemon-reload; systemctl restart fprintd.service"), but stays
-# quiet and non-fatal on systems without a running systemd.
+# Mirrors the last steps of upstream install.sh (install the three generated
+# configuration files, then udevadm reload/trigger and "systemctl
+# daemon-reload; systemctl restart fprintd.service"), but stays quiet and
+# non-fatal on systems without a running systemd.
+#
+# The files are shipped as templates in /usr/share and copied here rather than
+# installed into /etc by dpkg: they are generated from the device metadata, they
+# say "do not edit" in their first line, and conffile semantics would leave a
+# stale drop-in behind after removal or, worse, would make dpkg treat the file
+# as deleted by the administrator and not restore it on a later reinstall.
+# Copying on every configure also refreshes the driver list from the new
+# templates on upgrade.
 set -e
 
 #DEBHELPER#
 
 PKG=libfprint-goodix-spi
 PROJECT_ID=goodix-spi-driver
+TEMPLATES=/usr/share/$PKG
+MARKER='# Managed by goodix-spi-driver; do not edit.'
 DROPIN_DIR=/etc/systemd/system/fprintd.service.d
+DROPIN_LIB=$DROPIN_DIR/20-goodix-spi-libfprint.conf
+DROPIN_ADAPTIVE=$DROPIN_DIR/30-goodix-spi-adaptive.conf
 DISTRO_UDEV_RULE=/usr/lib/udev/rules.d/70-libfprint-2.rules
 OUR_UDEV_RULE=/etc/udev/rules.d/70-libfprint-2.rules
+
+# install_template <template> <destination>
+# Overwrites a file that this package (or ./install.sh before it) wrote, leaves
+# anything else alone and warns instead of clobbering a local file.
+install_template() {
+    [ -f "$1" ] || return 0
+    if [ ! -e "$2" ]; then
+        install -D -m 0644 "$1" "$2"
+        return 0
+    fi
+    if [ "$(head -n 1 "$2" 2>/dev/null || true)" = "$MARKER" ]; then
+        install -m 0644 "$1" "$2"
+        return 0
+    fi
+    echo "$PKG: warning: $2 exists and was not written by this package;" \
+         "leaving it unchanged. Compare it with the template in $TEMPLATES" \
+         "if fprintd behaves unexpectedly." >&2
+}
 
 reload_udev() {
     if command -v udevadm >/dev/null 2>&1; then
@@ -40,6 +71,10 @@ restart_fprintd() {
 
 case "$1" in
     configure)
+        install_template "$TEMPLATES/20-goodix-spi-libfprint.conf" "$DROPIN_LIB"
+        install_template "$TEMPLATES/30-goodix-spi-adaptive.conf" "$DROPIN_ADAPTIVE"
+        install_template "$TEMPLATES/70-libfprint-2.rules" "$OUR_UDEV_RULE"
+
         reload_systemd
         reload_udev
         restart_fprintd

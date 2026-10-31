@@ -64,6 +64,12 @@ Installed files:
   /opt/goodix-spi-driver/libfprint/libfprint-2.so.2       -> libfprint-2.so.2.0.0
   /opt/goodix-spi-driver/libfprint/libfprint-2.so         -> libfprint-2.so.2.0.0
   /opt/goodix-spi-driver/fprintd/fprintd                  patched daemon
+  /usr/share/libfprint-goodix-spi/20-goodix-spi-libfprint.conf   templates
+  /usr/share/libfprint-goodix-spi/30-goodix-spi-adaptive.conf
+  /usr/share/libfprint-goodix-spi/70-libfprint-2.rules
+
+and, written by postinst from those templates (not tracked by dpkg):
+
   /etc/systemd/system/fprintd.service.d/20-goodix-spi-libfprint.conf
   /etc/systemd/system/fprintd.service.d/30-goodix-spi-adaptive.conf
   /etc/udev/rules.d/70-libfprint-2.rules
@@ -100,6 +106,15 @@ Consequences you should know about:
   rebuilt; `udevadm info` on the new device is the quickest way to notice.
 * AppArmor or SELinux confinement of fprintd, if a distribution ever adds it,
   must be extended for /opt/goodix-spi-driver/fprintd/fprintd.
+* The two drop-ins and the udev rule are generated from the device metadata and
+  are written into /etc by postinst from templates in
+  /usr/share/libfprint-goodix-spi, so they are *not* conffiles and dpkg does not
+  track them. Do not edit them (they say so in their first line); add a
+  99-local-*.conf drop-in instead. Conffile semantics were deliberately avoided
+  after reproducing both failure modes: dpkg keeps conffiles on removal, and a
+  kept ExecStart=/opt/... leaves fprintd.service pointing at a binary that is
+  gone; deleting the file from postrm instead makes dpkg record it as removed by
+  the administrator, and a later reinstall then silently does not restore it.
 
 
 3. Building (target suite: forky)
@@ -220,7 +235,10 @@ persistence and warm sessions.
     rm /etc/systemd/system/fprintd.service.d/30-goodix-spi-adaptive.conf
     systemctl daemon-reload && systemctl restart fprintd
 
-The file is a conffile, so a later package upgrade may offer it again.
+The three files below /etc are written by postinst from the templates in
+/usr/share/libfprint-goodix-spi, so they are regenerated on every install and
+upgrade; deleting one by hand lasts only until the next upgrade. For a
+permanent change use a 99-local-*.conf drop-in, which nothing rewrites.
 
 
 5.1 "No devices available" while the daemon is running
