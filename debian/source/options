@@ -1,0 +1,5 @@
+# Everything in this package is compiled from sources fetched at build time
+# into debian/build (upstream libfprint, upstream fprintd, Meson build
+# directories). Keep that tree out of generated source packages; it is removed
+# by "debian/rules clean" as well.
+tar-ignore = debian/build

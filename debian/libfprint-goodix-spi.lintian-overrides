@@ -1,0 +1,26 @@
+# The shadow install below /opt is a deliberate design decision inherited from
+# the upstream installer: the patched libfprint has the same SONAME as the
+# distribution library, so it must stay outside every library search path and
+# outside the ldconfig cache. See README.Debian, section 2.
+libfprint-goodix-spi: dir-or-file-in-opt
+
+# The rule intentionally shadows /usr/lib/udev/rules.d/70-libfprint-2.rules,
+# which is owned by the distribution libfprint package.  udev gives /etc
+# precedence for identical file names; installing into /usr/lib instead would
+# be a file conflict with libfprint-2-2, and renaming it would stop the rule
+# from replacing the distribution one (a duplicate would bind the device twice).
+# This is the same location the upstream install.sh uses.
+libfprint-goodix-spi: udev-rule-in-etc
+
+# Built outside the Debian archive; there is no BTS bug number to close.
+libfprint-goodix-spi: initial-upload-closes-no-bugs
+
+# The only systemctl call left is "daemon-reload": installing or removing the
+# fprintd.service drop-ins is invisible to systemd until the unit files are
+# re-read, and deb-systemd-invoke has no daemon-reload equivalent.  Service
+# restarts already go through deb-systemd-invoke.
+libfprint-goodix-spi: maintainer-script-calls-systemctl
+
+# /usr/share/doc/libfprint-goodix-spi is populated from files that are already
+# in the source package (README.md, docs/); no extra lintian exemptions needed
+# for them.

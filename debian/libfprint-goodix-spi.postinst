@@ -1,0 +1,73 @@
+#!/bin/sh
+# postinst script for libfprint-goodix-spi
+#
+# Mirrors the last steps of upstream install.sh (udevadm reload/trigger and
+# "systemctl daemon-reload; systemctl restart fprintd.service"), but stays
+# quiet and non-fatal on systems without a running systemd.
+set -e
+
+#DEBHELPER#
+
+PKG=libfprint-goodix-spi
+PROJECT_ID=goodix-spi-driver
+DROPIN_DIR=/etc/systemd/system/fprintd.service.d
+DISTRO_UDEV_RULE=/usr/lib/udev/rules.d/70-libfprint-2.rules
+OUR_UDEV_RULE=/etc/udev/rules.d/70-libfprint-2.rules
+
+reload_udev() {
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=spi --action=change >/dev/null 2>&1 || true
+        udevadm settle >/dev/null 2>&1 || true
+    fi
+}
+
+reload_systemd() {
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+
+restart_fprintd() {
+    if [ -d /run/systemd/system ]; then
+        if command -v deb-systemd-invoke >/dev/null 2>&1; then
+            deb-systemd-invoke try-restart fprintd.service >/dev/null 2>&1 || true
+        elif command -v systemctl >/dev/null 2>&1; then
+            systemctl try-restart fprintd.service >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+case "$1" in
+    configure)
+        reload_systemd
+        reload_udev
+        restart_fprintd
+
+        # $2 is empty on a fresh installation, set on upgrade.
+        if [ -z "${2:-}" ]; then
+            if [ -e "$DISTRO_UDEV_RULE" ]; then
+                echo "$PKG: note: $OUR_UDEV_RULE replaces the distribution" \
+                     "rule shipped by libfprint; other libfprint drivers are" \
+                     "covered by the regenerated file." >&2
+            fi
+            if [ -e "/var/lib/$PROJECT_ID/install.manifest" ]; then
+                echo "$PKG: note: a manifest from ./install.sh was found in" \
+                     "/var/lib/$PROJECT_ID; run ./uninstall.sh before relying" \
+                     "on dpkg to track these files." >&2
+            fi
+            echo "$PKG: the sensor provisions a random TLS key on first use and" \
+                 "stores it in /var/lib/fprint/gdix51c0.psk (root, 0600)." >&2
+        fi
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        ;;
+
+    *)
+        echo "postinst called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

@@ -1,0 +1,218 @@
+#!/usr/bin/make -f
+# debian/rules -- Debian packaging for the out-of-tree Goodix GDIX51C0 SPI
+# driver for libfprint.  It reproduces ./install.sh at *package build* time.
+#
+# Two contracts from the installer are deliberately preserved:
+#   1. Shadow prefix -- every built artifact goes below /opt/goodix-spi-driver,
+#      never into /usr/lib, with no ldconfig/shlibs entry; consumers opt in via
+#      LD_LIBRARY_PATH in a systemd drop-in (see override_dh_makeshlibs).
+#   2. Pinned upstream -- libfprint v1.94.10 and fprintd v1.94.5, fetched and
+#      patched with the project's own scripts, so the compiled tree is the same
+#      one install.sh compiles.
+# Deviations and their reasoning: debian/README.Debian.
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export DEB_LDFLAGS_MAINT_APPEND = -Wl,--as-needed
+
+# --- packaging layout ------------------------------------------------------
+PKG              := libfprint-goodix-spi
+PROJECT_ID       := goodix-spi-driver
+PKGDIR           := $(CURDIR)/debian/$(PKG)
+PREFIX           := /opt/$(PROJECT_ID)
+INSTALL_ROOT     := $(PKGDIR)$(PREFIX)
+LIBFPRINT_DST    := $(INSTALL_ROOT)/libfprint
+FPRINTD_DST      := $(INSTALL_ROOT)/fprintd
+DROPIN_DIR       := $(PKGDIR)/etc/systemd/system/fprintd.service.d
+UDEV_RULE_DST    := $(PKGDIR)/etc/udev/rules.d/70-libfprint-2.rules
+
+# --- build tree (removed by override_dh_clean) -----------------------------
+WORK             := $(CURDIR)/debian/build
+CACHE            := $(WORK)/sources
+LIBFPRINT_SRC    := $(CACHE)/libfprint
+LIBFPRINT_BUILD  := $(WORK)/libfprint-build
+FPRINTD_SRC      := $(CACHE)/fprintd
+FPRINTD_BUILD    := $(WORK)/fprintd-build
+
+# --- pinned upstream revisions (keep in sync with README.md) ---------------
+LIBFPRINT_REF    := v1.94.10
+FPRINTD_REF      := v1.94.5
+
+# --- Debian build flags, injected into both Meson projects -----------------
+DEB_CFLAGS       := $(shell dpkg-buildflags --get CFLAGS) $(shell dpkg-buildflags --get CPPFLAGS)
+DEB_LDFLAGS      := $(shell dpkg-buildflags --get LDFLAGS)
+
+DEVICE_METADATA  := config/supported-spi-devices.tsv
+LIBFPRINT_SO     := $(LIBFPRINT_BUILD)/libfprint/libfprint-2.so.2.0.0
+LIBFPRINT_UDEV   := $(LIBFPRINT_BUILD)/libfprint/70-libfprint-2.rules
+FPRINTD_BIN      := $(FPRINTD_BUILD)/src/fprintd
+
+%:
+	dh $@
+
+# The repository root carries no build system; both upstream trees are
+# configured in override_dh_auto_build, so dh_auto_configure has nothing to do.
+# The hardware probe from install.sh (check_hardware) is deliberately not run:
+# a build host has no fingerprint sensor.  install.sh has --skip-hardware-check
+# for exactly that case, and the ACPI ids are verified against the generated
+# udev rules instead -- a stronger check than "a sensor was plugged in".
+override_dh_auto_build:
+	@echo "I: fetching pinned libfprint $(LIBFPRINT_REF)"
+	LIBFPRINT_REF=$(LIBFPRINT_REF) \
+	LIBFPRINT_CACHE_ROOT=$(CACHE) \
+	LIBFPRINT_SOURCE_DIR=$(LIBFPRINT_SRC) \
+	LIBFPRINT_CREATE_LINK=0 \
+	  ./scripts/fetch-libfprint.sh >/dev/null
+	@echo "I: fetching pinned fprintd $(FPRINTD_REF)"
+	FPRINTD_REF=$(FPRINTD_REF) \
+	FPRINTD_CACHE_ROOT=$(CACHE) \
+	FPRINTD_SOURCE_DIR=$(FPRINTD_SRC) \
+	  ./scripts/fetch-fprintd.sh >/dev/null
+
+	@echo "I: synchronising drivers/ and lib/goodix/ into libfprint"
+	./scripts/libfprint/prepare-tree.sh $(LIBFPRINT_SRC)
+
+	@echo "I: building libfprint (release profile)"
+	meson setup \
+	  --buildtype=plain \
+	  --prefix=/usr \
+	  -Dgoodix_spi_developer=false \
+	  -Dudev_rules=enabled \
+	  -Dudev_hwdb=disabled \
+	  -Ddoc=false \
+	  -Dintrospection=false \
+	  -Dinstalled-tests=false \
+	  -Dgtk-examples=false \
+	  -Dc_args='$(DEB_CFLAGS)' \
+	  -Dc_link_args='$(DEB_LDFLAGS)' \
+	  $(LIBFPRINT_BUILD) $(LIBFPRINT_SRC)
+	meson compile -C $(LIBFPRINT_BUILD)
+
+	# install.sh:348-352 -- refuse to continue when the two shipped artifacts
+	# are missing.  The shadow library is useless without its udev rule.
+	@set -e; \
+	test -f '$(LIBFPRINT_SO)'   || { echo "E: built libfprint not found: $(LIBFPRINT_SO)" >&2; exit 1; }; \
+	test -f '$(LIBFPRINT_UDEV)' || { echo "E: generated udev rules not found: $(LIBFPRINT_UDEV)" >&2; exit 1; }
+
+	# install.sh:352-357 -- every declared ACPI id must have been emitted by
+	# the driver registration that prepare-tree.sh injected.
+	# install.sh:359-367 -- then widen the exact MODALIAS match to a glob so
+	# firmware that also advertises a _CID (acpi:ID:ID:) still binds.
+	@set -e; \
+	ids=$$(awk '!/^#/ && NF { print $$2 }' $(DEVICE_METADATA)); \
+	test -n "$$ids" || { echo "E: no supported ACPI ids declared in $(DEVICE_METADATA)" >&2; exit 1; }; \
+	for id in $$ids; do \
+	  grep -Fq "ENV{MODALIAS}==\"acpi:$$id:" $(LIBFPRINT_UDEV) \
+	    || { echo "E: generated udev rules lack ACPI id $$id" >&2; exit 1; }; \
+	done; \
+	for id in $$ids; do \
+	  sed -i "s#ENV{MODALIAS}==\"acpi:$$id:\"#ENV{MODALIAS}==\"acpi:$$id:*\"#g" $(LIBFPRINT_UDEV); \
+	  grep -Fq "ENV{MODALIAS}==\"acpi:$$id:*\"" $(LIBFPRINT_UDEV) \
+	    || { echo "E: could not widen the udev rule for ACPI id $$id" >&2; exit 1; }; \
+	done
+
+	@echo "I: building patched fprintd against the un-installed libfprint"
+	./scripts/apply-fprintd-patch.sh $(FPRINTD_SRC)
+	PKG_CONFIG_PATH=$(LIBFPRINT_BUILD)/meson-uninstalled \
+	  meson setup \
+	  --buildtype=plain \
+	  --prefix=/usr \
+	  -Dman=false -Dgtk_doc=false -Dpam=false -Dsystemd=false \
+	  -Dc_args='$(DEB_CFLAGS)' \
+	  -Dc_link_args='$(DEB_LDFLAGS)' \
+	  $(FPRINTD_BUILD) $(FPRINTD_SRC)
+	PKG_CONFIG_PATH=$(LIBFPRINT_BUILD)/meson-uninstalled \
+	  meson compile -C $(FPRINTD_BUILD) fprintd
+	@set -e; \
+	test -x '$(FPRINTD_BIN)' || { echo "E: fprintd was not built: $(FPRINTD_BIN)" >&2; exit 1; }; \
+	if patchelf --print-rpath '$(FPRINTD_BIN)' | grep -q .; then \
+	  echo "I: stripping build-tree RPATH from fprintd"; \
+	  patchelf --remove-rpath '$(FPRINTD_BIN)'; \
+	fi
+
+# The driver unit tests are deterministic and hardware-free, but they are only
+# built by the upstream tests/ directory; skip cleanly when it is absent.
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	@if [ -x $(LIBFPRINT_BUILD)/tests/goodix-spi/test-goodix-wire ]; then \
+	  meson test -C $(LIBFPRINT_BUILD) --print-errorlogs --suite goodix-spi; \
+	else \
+	  echo "I: goodix-spi unit tests not present in this build, skipping"; \
+	fi
+endif
+
+override_dh_auto_install:
+	install -d $(LIBFPRINT_DST) $(FPRINTD_DST) $(DROPIN_DIR) $(PKGDIR)/etc/udev/rules.d
+
+	# install.sh:376-378 -- real ->versioned shared object plus the two
+	# conventional symlinks.  The directory is /opt, not /usr/lib.
+	# install.sh uses 0755 here; a shared object does not need the execute
+	# bit, and lintian rejects it, so the packaged copy is 0644.
+	install -m 0644 $(LIBFPRINT_SO) $(LIBFPRINT_DST)/libfprint-2.so.2.0.0
+	ln -sfn libfprint-2.so.2.0.0 $(LIBFPRINT_DST)/libfprint-2.so.2
+	ln -sfn libfprint-2.so.2.0.0 $(LIBFPRINT_DST)/libfprint-2.so
+
+	# scripts/build-install-fprintd.sh -- the shadow daemon.
+	install -m 0755 $(FPRINTD_BIN) $(FPRINTD_DST)/fprintd
+
+# install.sh:393 -- the udev rule is installed under /etc so that it shadows
+# the distribution copy of the same name in /usr/lib/udev/rules.d.  install.sh
+# writes it through install_owned_file(), and postrm relies on that first-line
+# ownership marker to decide whether the file may be removed.
+	@set -e; \
+	mkdir -p $(WORK); \
+	{ \
+	  printf '%s\n' "# Managed by $(PROJECT_ID); do not edit."; \
+	  cat $(LIBFPRINT_UDEV); \
+	} > $(WORK)/70-libfprint-2.rules; \
+	install -m 0644 $(WORK)/70-libfprint-2.rules $(UDEV_RULE_DST)
+
+	# install.sh:380-392 -- compose the LD_LIBRARY_PATH drop-in from the
+	# device hook instead of duplicating its content here.  A scrubbed
+	# environment keeps packager-local GDIX51C0_* settings out of the package.
+	@set -e; \
+	mkdir -p $(WORK); \
+	emit=$(WORK)/gdix51c0-emit.conf; \
+	env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin GOODIX_SPI_DEVELOPER=0 \
+	  ./config/install.d/gdix51c0 emit > $$emit; \
+	{ \
+	  printf '%s\n' "# Managed by $(PROJECT_ID); do not edit."; \
+	  printf '[Service]\n'; \
+	  printf 'Environment=LD_LIBRARY_PATH=$(PREFIX)/libfprint\n'; \
+	  cat $$emit; \
+	} > $(DROPIN_DIR)/20-goodix-spi-libfprint.conf
+	chmod 0644 $(DROPIN_DIR)/20-goodix-spi-libfprint.conf
+
+	# scripts/build-install-fprintd.sh -- ExecStart replacement, the library
+	# path and the warm-session opt-in.  The driver list comes from the device
+	# metadata so that a new sensor cannot silently lose its warm session.
+	@set -e; \
+	drivers=$$(awk '!/^#/ && NF { print $$1 }' $(DEVICE_METADATA) | paste -sd, -); \
+	test -n "$$drivers" || { echo "E: no supported drivers declared" >&2; exit 1; }; \
+	{ \
+	  printf '%s\n' "# Managed by $(PROJECT_ID); do not edit."; \
+	  printf '[Service]\n'; \
+	  printf 'ExecStart=\n'; \
+	  printf 'ExecStart=$(PREFIX)/fprintd/fprintd --no-timeout\n'; \
+	  printf 'Environment=LD_LIBRARY_PATH=$(PREFIX)/libfprint\n'; \
+	  printf 'Environment=FPRINTD_KEEP_WARM_DRIVERS=%s\n' "$$drivers"; \
+	  printf 'Environment=GDIX51C0_WARM_SESSION=1\n'; \
+	} > $(DROPIN_DIR)/30-goodix-spi-adaptive.conf
+	chmod 0644 $(DROPIN_DIR)/30-goodix-spi-adaptive.conf
+
+# The shadow libfprint must stay invisible to the dynamic linker database.
+# Without this, dh_makeshlibs ships a "libfprint-2 2 libfprint-goodix-spi"
+# shlibs entry plus an ldconfig trigger: unrelated builds linking libfprint
+# would then satisfy their dependency with this private, patched ABI.
+override_dh_makeshlibs:
+	@echo "I: dh_makeshlibs skipped: $(PREFIX)/libfprint is a private shadow library"
+
+# dpkg-shlibdeps must resolve libfprint-2.so.2 against the private directory;
+# it is provided by this package itself, so no inter-package dependency may be
+# derived from it.
+override_dh_shlibdeps:
+	dh_shlibdeps -- --ignore-missing-info -l$(LIBFPRINT_DST)
+
+override_dh_clean:
+	dh_clean
+	rm -rf $(WORK)

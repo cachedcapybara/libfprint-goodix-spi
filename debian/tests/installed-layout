@@ -1,0 +1,76 @@
+#!/bin/sh
+# autopkgtest: verify the shadow-install layout, i.e. the parts of the upstream
+# install.sh contract that this package promises to preserve.  No hardware is
+# required and nothing is modified.
+set -eu
+
+PREFIX=/opt/goodix-spi-driver
+LIBDIR=$PREFIX/libfprint
+DROPIN_DIR=/etc/systemd/system/fprintd.service.d
+UDEV_RULE=/etc/udev/rules.d/70-libfprint-2.rules
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# --- artifacts exist and are the ones install.sh would have written ---------
+[ -f "$LIBDIR/libfprint-2.so.2.0.0" ] || fail "shadow libfprint missing"
+[ -x "$PREFIX/fprintd/fprintd" ] || fail "shadow fprintd missing"
+# A shared object is loaded, not executed; install.sh uses 0755 here, the
+# package intentionally uses 0644 (lintian: shared-library-is-executable).
+[ ! -x "$LIBDIR/libfprint-2.so.2.0.0" ] \
+    || fail "shadow libfprint must not carry the execute bit"
+[ "$(readlink -f "$LIBDIR/libfprint-2.so.2")" = "$LIBDIR/libfprint-2.so.2.0.0" ] \
+    || fail "libfprint-2.so.2 symlink is wrong"
+[ "$(readlink -f "$LIBDIR/libfprint-2.so")" = "$LIBDIR/libfprint-2.so.2.0.0" ] \
+    || fail "libfprint-2.so symlink is wrong"
+
+# --- the library is a private, patched build: the Goodix driver is inside ----
+if ! grep -qa -e gdix51c0 -e GDIX51C0 "$LIBDIR/libfprint-2.so.2.0.0"; then
+    fail "shadow libfprint does not contain the gdix51c0 driver"
+fi
+
+# --- it must NOT be reachable through the dynamic linker database -----------
+if ldconfig -p 2>/dev/null | grep 'libfprint-2\.so\.2' | grep -q "$PREFIX"; then
+    fail "shadow libfprint was registered with ldconfig"
+fi
+if [ -d /etc/ld.so.conf.d ] && grep -rq "$PREFIX" /etc/ld.so.conf.d 2>/dev/null; then
+    fail "shadow libfprint directory was added to the ldconfig search path"
+fi
+if dpkg -L libfprint-goodix-spi | grep -q '^/usr/lib/'; then
+    fail "the package owns files under /usr/lib"
+fi
+
+# --- fprintd.service is redirected to the shadow pair -----------------------
+[ -f "$DROPIN_DIR/20-goodix-spi-libfprint.conf" ] || fail "20- drop-in missing"
+[ -f "$DROPIN_DIR/30-goodix-spi-adaptive.conf" ] || fail "30- drop-in missing"
+grep -qx "Environment=LD_LIBRARY_PATH=$LIBDIR" \
+    "$DROPIN_DIR/20-goodix-spi-libfprint.conf" \
+    || fail "20- drop-in does not point LD_LIBRARY_PATH at the shadow library"
+grep -qx "ExecStart=$PREFIX/fprintd/fprintd --no-timeout" \
+    "$DROPIN_DIR/30-goodix-spi-adaptive.conf" \
+    || fail "30- drop-in does not replace ExecStart with the shadow daemon"
+grep -qx 'Environment=FPRINTD_KEEP_WARM_DRIVERS=gdix51c0' \
+    "$DROPIN_DIR/30-goodix-spi-adaptive.conf" \
+    || fail "30- drop-in does not opt the sensor into warm sessions"
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl cat fprintd.service >/dev/null 2>&1 \
+        || fail "fprintd.service is not resolvable"
+fi
+
+# --- udev rule matches the Goodix ACPI modalias -----------------------------
+[ -f "$UDEV_RULE" ] || fail "udev rule missing"
+grep -q 'acpi:GDIX51C0:\*' "$UDEV_RULE" \
+    || fail "udev rule does not match acpi:GDIX51C0:*"
+
+# --- every managed file carries the installer's ownership marker -----------
+for f in "$DROPIN_DIR/20-goodix-spi-libfprint.conf" \
+         "$DROPIN_DIR/30-goodix-spi-adaptive.conf" \
+         "$UDEV_RULE"; do
+    [ "$(head -n 1 "$f")" = '# Managed by goodix-spi-driver; do not edit.' ] \
+        || fail "$f is missing the ownership marker"
+done
+
+echo "PASS: shadow layout matches the install.sh contract"

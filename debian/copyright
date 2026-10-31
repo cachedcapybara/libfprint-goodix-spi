@@ -1,0 +1,68 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: libfprint-goodix-spi
+Upstream-Contact: Berke Kabagöz <berkekbgz@gmail.com>
+Source: https://github.com/berkekbgz/libfprint-goodix-spi
+
+Files: *
+Copyright: 2026 Berke Kabagöz <berkekbgz@gmail.com>
+License: LGPL-2.1+
+
+Files: lib/goodix/common/*
+Copyright: 2021 Alexander Meiler <alex.meiler@protonmail.com>
+ 2021 Matthieu CHARETTE <matthieu.charette@gmail.com>
+ 2021 Natasha England-Elbro <natasha@natashaee.me>
+ 2024 goodix-fp-linux-dev contributors
+ 2026 Berke Kabagöz <berkekbgz@gmail.com>
+License: LGPL-2.1+
+Comment: Adapted from the GoodixTLS libfprint branch and the goodix53x5
+ libfprint driver; see PROVENANCE.md for the exact revisions and for the
+ copied-versus-behavioural boundaries.
+
+Files: lib/goodix/chicago/*
+Copyright: 2026 Berke Kabagöz <berkekbgz@gmail.com>
+License: LGPL-2.1+
+
+Files: drivers/gdix51c0/*
+Copyright: 2026 Berke Kabagöz <berkekbgz@gmail.com>
+License: LGPL-2.1+
+
+Files: patches/libfprint/*
+Copyright: 2026 Berke Kabagöz <berkekbgz@gmail.com>
+License: LGPL-2.1+
+
+Files: patches/fprintd/*
+Copyright: 2026 Berke Kabagöz <berkekbgz@gmail.com>
+License: GPL-2+
+Comment: Patches against fprintd follow the licence of their target project.
+
+Files: debian/*
+Copyright: 2026 Berke Kabagöz <berkekbgz@gmail.com>
+License: LGPL-2.1+
+
+License: LGPL-2.1+
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 2.1 of the License, or (at
+ your option) any later version.
+ .
+ This library is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser
+ General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in "/usr/share/common-licenses/LGPL-2.1".
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ This program is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
+ Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".

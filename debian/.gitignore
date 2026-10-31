@@ -1,0 +1,8 @@
+# Build tree created by debian/rules (fetched upstream sources, Meson build
+# directories, debhelper state). Kept out of the branch.
+/build/
+/files
+/*.substvars
+/*.debhelper
+/.debhelper/
+/libfprint-goodix-spi/

@@ -1,0 +1,47 @@
+How this packaging relates to the upstream source
+=================================================
+
+This branch adds debian/ to the upstream repository and changes nothing else.
+debian/ is the only difference against upstream main.
+
+There is no upstream release tarball to package: the repository is a driver
+tree plus two *integration* patches, and nothing in it is installable on its
+own. Two other projects have to be compiled together with it:
+
+    libfprint v1.94.10   patches/libfprint/1.94.10.patch
+    fprintd   v1.94.5    patches/fprintd/1.94.5-goodix-spi.patch
+
+Both are fetched at build time by the project's own scripts
+(scripts/fetch-libfprint.sh and scripts/fetch-fprintd.sh) into
+debian/build/sources, then prepared with scripts/libfprint/prepare-tree.sh and
+scripts/apply-fprintd-patch.sh, which debian/rules calls unchanged. The same
+scripts are what ./install.sh uses, so the tree that gets compiled here is the
+tree the upstream installer compiles.
+
+Consequences:
+
+* The build needs network access. debian/README.Debian, section 3, states the
+  reason and the pins.
+
+* debian/source/format is "3.0 (quilt)", but a source package built with
+  "dpkg-buildpackage -S" would still fail for lack of an orig tarball: the two
+  upstream trees are not part of this source. Only binary builds
+  ("dpkg-buildpackage -b -uc -us") are supported from this branch.
+
+* debian/rules clean removes debian/build, and debian/source/options lists the
+  same path as tar-ignore so it cannot leak into a generated source package.
+
+* The pins are fixed (v1.94.10, v1.94.5). scripts/fetch-*.sh record the ref and
+  the integration revision in the checkout's git config and refuse to reuse a
+  tree that does not match, so a warm cache cannot silently change the build.
+
+* To build offline, pre-populate debian/build/sources/libfprint and
+  debian/build/sources/fprintd with git trees that carry the matching
+  goodix-spi.sourceRef (and, for libfprint, goodix-spi.integrationRevision)
+  configuration values; the fetch scripts then reuse them instead of cloning.
+
+Files that deliberately are not here:
+
+* debian/watch - upstream has no tagged release; the package version follows
+  the 0.0~git<date>.<commit> snapshot scheme.
+* A separate -dbgsym stanza - debhelper generates it.

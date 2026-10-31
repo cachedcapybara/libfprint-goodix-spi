@@ -1,0 +1,326 @@
+libfprint-goodix-spi for Debian
+===============================
+
+This package ships the out-of-tree Goodix GDIX51C0 SPI driver for libfprint.
+It exists because two upstream components have to be modified to make the
+sensor work, and neither modification can be expressed as a patch to the
+distribution packages:
+
+  * libfprint must be compiled with the GDIX51C0 driver, its private
+    lib/goodix/* backend and an SPI udev rule that matches the Goodix ACPI
+    modalias (patches/libfprint/1.94.10.patch, applied to v1.94.10);
+  * fprintd must learn to persist adaptive "templateStudy" updates and to keep
+    a warm device session across Claim/Release and suspend/resume
+    (patches/fprintd/1.94.5-goodix-spi.patch, applied to v1.94.5).
+
+Because the patched libfprint is not ABI-compatible with whatever the
+distribution ships, the upstream project installs both components as a private
+"shadow" pair below /opt. This package does the same. In particular it does
+*not* install anything into /usr/lib/<multiarch>, does not run ldconfig and
+does not provide a shlibs/symbols entry for the shadow library.
+
+
+1. What ./install.sh does, and how the package reproduces it
+------------------------------------------------------------
+
+  install.sh step                                  package equivalent
+  ----------------------------------------------   -------------------------------
+  preflight: read config/supported-spi-devices.tsv build: same file is parsed by
+  (driver id, ACPI id, install hook)               debian/rules; ids are verified
+                                                   against the generated udev rule
+  preflight: pkg-config and tool checks            Build-Depends in debian/control
+  preflight: probe /sys/bus/spi/... (check_hardware) NOT run - a build host has no
+                                                   sensor; equivalent to
+                                                   --skip-hardware-check
+  fetch libfprint v1.94.10 into the user cache     build: scripts/fetch-libfprint.sh
+                                                   into debian/build/sources
+  scripts/libfprint/prepare-tree.sh: copy          build: called unchanged
+  drivers/, lib/goodix/, integration/ and apply
+  the libfprint patch
+  meson setup + compile (install profile)          build: equivalent option set,
+                                                   see section 4
+  install libfprint-2.so.2.0.0 + .so.2 + .so       install: same three files, same
+  to /opt/goodix-spi-driver/libfprint              directory, mode 0644 instead of
+                                                   0755 (a library needs no execute
+                                                   bit; see section 4)
+  install generated 70-libfprint-2.rules to         install: same path
+  /etc/udev/rules.d, widen ACPI match to a glob
+  write 20-goodix-spi-libfprint.conf with          install: composed from the same
+  [Service] + LD_LIBRARY_PATH + hook emit output   install hook at build time
+  build patched fprintd and install                install: built and installed at
+  /opt/goodix-spi-driver/fprintd/fprintd           build time
+  write 30-goodix-spi-adaptive.conf                install: same content
+  (ExecStart override, warm session, driver list)  (driver list from metadata)
+  seed /var/lib/fprint/gdix51c0.psk from           NOT reproduced, see section 6
+  GOODIX_TLS_PSK_HEX
+  write /var/lib/goodix-spi-driver/install.manifest NOT reproduced: dpkg tracks
+                                                   the files instead
+  udevadm reload/trigger, systemctl daemon-reload  postinst (and postrm)
+  and restart fprintd.service
+
+Installed files:
+
+  /opt/goodix-spi-driver/libfprint/libfprint-2.so.2.0.0   patched libfprint
+  /opt/goodix-spi-driver/libfprint/libfprint-2.so.2       -> libfprint-2.so.2.0.0
+  /opt/goodix-spi-driver/libfprint/libfprint-2.so         -> libfprint-2.so.2.0.0
+  /opt/goodix-spi-driver/fprintd/fprintd                  patched daemon
+  /etc/systemd/system/fprintd.service.d/20-goodix-spi-libfprint.conf
+  /etc/systemd/system/fprintd.service.d/30-goodix-spi-adaptive.conf
+  /etc/udev/rules.d/70-libfprint-2.rules
+
+
+2. Why everything stays in /opt
+-------------------------------
+
+* ABI. The shadow library exports the same SONAME (libfprint-2.so.2) as the
+  distribution libfprint but is a different build with a private, unversioned
+  driver backend. Registering it in ldconfig or shipping it in a library
+  directory would let unrelated processes load it and crash or, worse, load an
+  unpatched fprintd against a patched library.
+* Upgradability. The pin (libfprint v1.94.10) is not the distribution version.
+  Keeping the pair outside /usr means a distribution upgrade of libfprint or
+  fprintd cannot half-upgrade the shadow pair; /opt only has to be re-checked
+  when the sensor stops working.
+* Upstream compatibility. Everything here works the same way whether the user
+  ran ./install.sh or installed this package, so the upstream documentation,
+  the hook scripts and uninstall.sh keep being meaningful.
+
+Consequences you should know about:
+
+* `dh_makeshlibs` is deliberately disabled (no shlibs file, no ldconfig
+  trigger) and `dh_shlibdeps` resolves libfprint-2.so.2 from the package's own
+  /opt directory (`--ignore-missing-info`), so no dependency on the
+  distribution libfprint package is generated.
+* /etc/udev/rules.d/70-libfprint-2.rules has the same file name as the rule
+  shipped by libfprint in /usr/lib/udev/rules.d. udev prefers /etc for equal
+  names, so the distribution rule is shadowed, not merged. The file installed
+  here is generated from a full libfprint build with the default driver set,
+  so the other drivers keep their rules. If the distribution libfprint adds a
+  new device rule later, it will not take effect until this package is
+  rebuilt; `udevadm info` on the new device is the quickest way to notice.
+* AppArmor or SELinux confinement of fprintd, if a distribution ever adds it,
+  must be extended for /opt/goodix-spi-driver/fprintd/fprintd.
+
+
+3. Building (target suite: forky)
+---------------------------------
+
+This branch targets Debian 14 "forky", the suite that carries the gusb runtime
+package rename described at the end of this section. Only binary builds are
+supported from a git checkout - there is no upstream tarball and no tagged
+release to build a source package from, see README.source:
+
+    dpkg-buildpackage -b -uc -us
+
+Checked in a debian:forky container (debhelper 14.5, meson 1.12.1,
+libgusb2a 0.4.9-8, libgpiod3 2.2.5): the build completes, lintian is clean,
+the package installs and removes cleanly, and the result contains exactly the
+files listed in section 1. Two build dependencies are easy to miss because
+install.sh's preflight does not check them:
+
+  * libpixman-1-dev - required by the aes3k imaging helper as soon as the
+    default (complete) driver set is built;
+  * systemd-dev - provides udev.pc on trixie and later; libudev-dev alone only
+    ships libudev.pc, and libfprint's meson asks for udev.
+
+Both are in Build-Depends.
+
+Note that the build needs network access: the pinned upstream libfprint and
+fprintd trees are fetched with the project's own fetch scripts into
+debian/build/sources (removed by `debian/rules clean`). This is a deliberate
+deviation from "no network during build" - packaging a moving target that
+pins two other projects cannot be done from a single source tarball. The
+fetched revisions are fixed (`v1.94.10`, `v1.94.5`) and the checkout is
+verified per ref, so the build is reproducible as long as those refs exist.
+
+libgpiod >= 2.0 is required by the driver. Releases that still ship libgpiod
+1.x (for example Debian bookworm and Ubuntu 24.04) cannot satisfy the
+Build-Depends; build in a newer chroot/container instead of weakening the
+version constraint.
+
+Rebuild on the suite you are going to install on. dpkg-shlibdeps derives
+Depends from the shlibs/symbols files of the build host, so the dependency
+names are those of the *build* suite, not of the target. forky renamed the
+gusb runtime package libgusb2 -> libgusb2a while its SONAME stayed
+libgusb.so.2, so a package built on trixie is not installable on forky
+although the ABI is identical:
+
+    libfprint-goodix-spi : Depends: libgusb2 (>= 0.3.3) but it is not installable
+
+Building this branch on forky produces libgusb2a in Depends and installs
+cleanly; that single name is the only difference between the two builds. The
++forky1 suffix in debian/changelog keeps them distinguishable - bump that
+suffix (dch --local) rather than reusing it if you rebuild elsewhere.
+
+No debian/watch file is provided: upstream has no tagged releases yet, so the
+package version follows the "0.0~git<date>.<commit>" snapshot scheme.
+
+
+4. Build options, and why they differ from install.sh
+-----------------------------------------------------
+
+install.sh builds with the Meson defaults plus -Dgoodix_spi_developer=false.
+debian/rules additionally passes:
+
+    -Dudev_rules=enabled -Dudev_hwdb=disabled -Ddoc=false
+    -Dintrospection=false -Dinstalled-tests=false -Dgtk-examples=false
+
+None of these change the two shipped artifacts (libfprint-2.so.2.0.0 and
+70-libfprint-2.rules). They only avoid building documentation, GObject
+introspection data and example programs, which would otherwise have to be
+thrown away before packaging and would pull in extra build dependencies.
+udev_rules stays enabled because the generated rule is a shipped artifact.
+Every option above is already used by the project's own CI profile
+(scripts/libfprint/build.sh --profile ci), so the option names are known to be
+valid for the pinned revision.
+The driver set is left at the upstream default so that the generated udev rule
+covers every driver of the distribution libfprint, whose rule it shadows.
+
+The build also strips a build-tree RPATH from the shadow fprintd binary if
+Meson left one (install.sh copies the binary as built, which can leave the
+build path of the packager inside the ELF file). At run time the library is
+found through LD_LIBRARY_PATH from the drop-in, as intended.
+
+One cosmetic difference: install.sh installs libfprint-2.so.2.0.0 with mode
+0755. The package installs it 0644, because a shared object does not need the
+execute bit and lintian treats an executable .so as an error. The symlinks and
+the daemon binary (0755) are unchanged.
+
+
+5. After installation
+---------------------
+
+The package does not touch /etc/fprintd.conf and does not enroll anything.
+Test with an existing distribution tool:
+
+    fprintd-list "$USER"
+    fprintd-enroll -f right-index-finger
+    fprintd-verify
+
+GPIO lines: the defaults match the machine the driver was developed on. If
+your laptop wires the sensor differently, do not edit the packaged drop-in
+directly - create /etc/systemd/system/fprintd.service.d/99-local-gpio.conf
+with, for example:
+
+    [Service]
+    Environment=GDIX51C0_GPIOCHIP=/dev/gpiochip1
+    Environment=GDIX51C0_IRQ_LINE=42
+    Environment=GDIX51C0_RESET_LINE=41
+
+and run `systemctl daemon-reload && systemctl restart fprintd`. The hook
+documented in config/install.d/gdix51c0 also accepts GDIX51C0_PSK_STATE_FILE
+and GDIX51C0_CHICAGO_CALIBRATION_FILE. Developer-only capture and fault
+injection variables are compiled out of the release build shipped here.
+
+Disabling the patched daemon (the equivalent of `./install.sh
+--without-fprintd`): the distribution fprintd then runs against the shadow
+library, which keeps the driver working but loses adaptive-template
+persistence and warm sessions.
+
+    rm /etc/systemd/system/fprintd.service.d/30-goodix-spi-adaptive.conf
+    systemctl daemon-reload && systemctl restart fprintd
+
+The file is a conffile, so a later package upgrade may offer it again.
+
+
+5.1 "No devices available" while the daemon is running
+------------------------------------------------------
+
+    fprintd-enroll -f right-index-finger
+    Impossible to enroll: GDBus.Error:net.reactivated.Fprint.Error.NoSuchDevice:
+    No devices available
+
+while fprintd.service is active and executing the shadow binary. This message
+means libfprint enumerated *zero* devices; it is not a failure to open one
+(that would read "Device unavailable"). libfprint has no hotplug monitor: it
+enumerates once, at startup, by walking the udev "spidev" subsystem and
+matching each device's sysfs path against the driver's ACPI id. So the whole
+chain must exist at start time:
+
+    /sys/bus/spi/devices/spi-GDIX51C0:00  ->  /sys/class/spidev/spidevX.Y
+
+Check in this order:
+
+    pid=$(pgrep -x fprintd)
+    grep -i libfprint /proc/$pid/maps | awk '{print $6}' | sort -u
+    #   must be /opt/goodix-spi-driver/libfprint/libfprint-2.so.2.0.0.
+    #   The distribution library has the same SONAME, so a missing drop-in
+    #   degrades silently to an unpatched libfprint that has no gdix51c0.
+
+    systemctl show fprintd -p Environment
+    #   must contain LD_LIBRARY_PATH=/opt/goodix-spi-driver/libfprint
+
+    ls /sys/bus/spi/devices/ /sys/class/spidev/
+
+If the last command shows nothing while a controller exists
+(/sys/class/spi_master/spi0), the firmware is not exposing the sensor, and
+reloading udev rules cannot help: the kernel creates SPI slaves only for ACPI
+devices that report themselves present, and it skips all others before it
+reads their _CRS - silently, without a kernel message.
+
+One machine in this state (Huawei KLVF-XX) has the ACPI device but:
+
+    cat /sys/bus/acpi/devices/GDIX51C0:00/status   ->  0
+
+because its _STA is
+
+    Method (_STA) { If (HFTE) { Return (0x0F) } Return (Zero) }
+
+with HFTE cleared. That device's _CRS is otherwise complete and correct (SPI,
+ResourceSource \_SB.PC00.SPI0 matching the live controller, 10 MHz, one GpioIo
+for reset and one GpioInt for the interrupt), so the _STA answer is the only
+thing missing. Note that _INI does not run in that state either, and _INI is
+what enables the sensor.
+
+Remedy is firmware side and outside this package: enable the device in firmware
+(or in a Windows installation that provisions it), or override the ACPI table
+so that _STA returns 0x0F, shipped through the early initrd
+(CONFIG_ACPI_TABLE_UPGRADE). An override has to be regenerated after every BIOS
+update.
+
+Once the spidev node exists, restart fprintd - it will not be picked up
+otherwise.
+
+
+6. Sensor key, calibration and enrolled prints
+----------------------------------------------
+
+The driver authorizes one random first-run TLS provisioning and stores the key
+as /var/lib/fprint/gdix51c0.psk (root, mode 0600); calibration is stored next
+to it. These files are created by the driver at run time, not by this package,
+and they are deliberately *not* removed on purge: the sensor keeps its copy of
+the key, so deleting the host side makes the pair unrecoverable without a
+sensor reset, and is not something a package manager should do silently. The
+same reasoning applies to enrolled fingerprints in /var/lib/fprint.
+
+Cleanup, if that is really what you want, after `apt purge`:
+
+    rm -f /var/lib/fprint/gdix51c0.psk \
+          /var/lib/fprint/gdix51c0-calibration.bin \
+          /var/lib/fprint/gdix51c0-image-base.bin \
+          /var/lib/fprint/gdix51c0-dark-frame.bin
+
+To reuse a key that already exists (for example one provisioned by a previous
+./install.sh run or imported from a Windows installation on a dual-boot
+machine), write it *before* fprintd starts for the first time:
+
+    install -d -m 0700 /var/lib/fprint
+    printf '%s\n' "$GOODIX_TLS_PSK_HEX" > /var/lib/fprint/gdix51c0.psk
+    chmod 0600 /var/lib/fprint/gdix51c0.psk
+    systemctl restart fprintd
+
+Upgrading from an ./install.sh installation: run ./uninstall.sh first. The
+installer keeps its own manifest in /var/lib/goodix-spi-driver and would
+otherwise delete files that dpkg believes it owns. The postinst warns when
+that manifest is still present.
+
+
+7. Security model (quoted from upstream, and worth repeating)
+-------------------------------------------------------------
+
+The GDIX51C0 streams images to the host; every match runs on the CPU. It is
+not match-on-chip, there is no liveness detection, and a compromised host
+defeats it. Treat fingerprint unlock as a convenience factor, not as the only
+line of defence.
+
+ -- libfprint-goodix-spi packagers <packagers@example.invalid>

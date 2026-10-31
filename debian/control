@@ -1,0 +1,61 @@
+Source: libfprint-goodix-spi
+Section: admin
+Priority: optional
+Maintainer: libfprint-goodix-spi packagers <packagers@example.invalid>
+Build-Depends: debhelper-compat (= 13),
+ build-essential,
+ ca-certificates,
+ git,
+ meson,
+ ninja-build,
+ pkg-config,
+# libfprint build dependencies. This is exactly the pkg-config set that the
+# upstream install.sh preflight requires: glib-2.0, gio-2.0, gusb, gudev-1.0,
+# libgpiod and openssl.
+ libglib2.0-dev,
+ libgusb-dev,
+ libgudev-1.0-dev,
+# libudev-dev ships libudev.pc; the udev.pc that libfprint's meson checks comes
+# from systemd-dev on trixie and later.
+ libudev-dev,
+ systemd-dev,
+ libgpiod-dev (>= 2.0),
+# pixman is pulled in by the aes3k imaging helper.  install.sh does not list it
+# in its preflight, but the unmodified upstream driver set needs it, and the
+# driver set must stay complete: our udev rule shadows the distribution one.
+ libpixman-1-dev,
+ libssl-dev (>= 3.0),
+# fprintd build dependencies: polkit-gobject-1 is required by the patched
+# daemon, gettext for its translations.
+ libpolkit-gobject-1-dev,
+ gettext,
+# strips a build-tree RPATH from the shadow fprintd binary.
+ patchelf,
+Rules-Requires-Root: no
+Standards-Version: 4.6.2
+Homepage: https://github.com/berkekbgz/libfprint-goodix-spi
+Vcs-Git: https://github.com/berkekbgz/libfprint-goodix-spi.git
+Vcs-Browser: https://github.com/berkekbgz/libfprint-goodix-spi
+
+Package: libfprint-goodix-spi
+Architecture: any
+Depends: ${shlibs:Depends},
+ ${misc:Depends},
+ fprintd (>= 1.94),
+ systemd,
+ udev,
+Description: Goodix GDIX51C0 SPI driver for libfprint (shadow install)
+ Out-of-tree libfprint driver for the Goodix GDIX51C0 host-processing
+ fingerprint sensor, including the native ChicagoHS biometric backend
+ (calibration, preprocessing, enrollment, matching and adaptive learning).
+ .
+ Following the upstream installer, this package does not replace the
+ distribution libfprint. A patched libfprint and a patched fprintd are
+ installed as a private "shadow" pair below /opt/goodix-spi-driver; a systemd
+ drop-in for fprintd.service puts that library directory on LD_LIBRARY_PATH
+ and starts the shadow daemon instead of the distribution one. The sensor is
+ made visible through a udev rule for its ACPI modalias.
+ .
+ Uninstalling the package does not delete the on-disk sensor key, sensor
+ calibration or enrolled fingerprints; see /usr/share/doc/libfprint-goodix-spi/
+ README.Debian for the paths and for the manual cleanup procedure.

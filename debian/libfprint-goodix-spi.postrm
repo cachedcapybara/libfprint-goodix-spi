@@ -1,0 +1,84 @@
+#!/bin/sh
+# postrm script for libfprint-goodix-spi
+#
+# The systemd drop-ins and the udev rule live in /etc and are therefore
+# conffiles: dpkg keeps them on "remove".  That would leave fprintd.service
+# with an ExecStart pointing at a deleted shadow daemon, so the files are
+# removed here, guarded by the ownership marker that upstream install.sh writes
+# as the first line of every file it manages.
+set -e
+
+#DEBHELPER#
+
+PKG=libfprint-goodix-spi
+MARKER='# Managed by goodix-spi-driver; do not edit.'
+DROPIN_DIR=/etc/systemd/system/fprintd.service.d
+DROPIN_LIB=/etc/systemd/system/fprintd.service.d/20-goodix-spi-libfprint.conf
+DROPIN_ADAPTIVE=/etc/systemd/system/fprintd.service.d/30-goodix-spi-adaptive.conf
+UDEV_RULE=/etc/udev/rules.d/70-libfprint-2.rules
+
+remove_owned_file() {
+    [ -e "$1" ] || return 0
+    if [ "$(head -n 1 "$1" 2>/dev/null || true)" = "$MARKER" ]; then
+        rm -f "$1"
+    else
+        echo "$PKG: warning: $1 was modified locally and is left in place." >&2
+        echo "$PKG: warning: fprintd.service may still refer to the removed" \
+             "shadow install; fix or delete that file if the fingerprint" \
+             "daemon stops working." >&2
+    fi
+}
+
+reload_udev() {
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=spi --action=change >/dev/null 2>&1 || true
+        udevadm settle >/dev/null 2>&1 || true
+    fi
+}
+
+reload_systemd() {
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+
+restart_fprintd() {
+    if [ -d /run/systemd/system ]; then
+        if command -v deb-systemd-invoke >/dev/null 2>&1; then
+            deb-systemd-invoke try-restart fprintd.service >/dev/null 2>&1 || true
+        elif command -v systemctl >/dev/null 2>&1; then
+            systemctl try-restart fprintd.service >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+case "$1" in
+    remove|purge)
+        remove_owned_file "$DROPIN_ADAPTIVE"
+        remove_owned_file "$DROPIN_LIB"
+        remove_owned_file "$UDEV_RULE"
+        rmdir "$DROPIN_DIR" >/dev/null 2>&1 || true
+
+        reload_udev
+        reload_systemd
+        restart_fprintd
+
+        if [ "$1" = "purge" ]; then
+            echo "$PKG: sensor key, calibration data and enrolled prints were" \
+                 "kept in /var/lib/fprint. Remove them manually with:" >&2
+            echo "  rm -f /var/lib/fprint/gdix51c0.psk" \
+                 "/var/lib/fprint/gdix51c0-calibration.bin" >&2
+        fi
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        ;;
+
+    *)
+        echo "postrm called with unknown argument '$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
