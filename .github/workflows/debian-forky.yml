@@ -1,0 +1,148 @@
+name: Debian forky package
+
+# Builds the binary package from debian/ inside an official Debian forky
+# container.  The container is the point of this workflow: dpkg-shlibdeps
+# derives runtime package names from the build host, so a package built on the
+# runner's Ubuntu image would carry dependency names that forky does not have
+# (e.g. libgusb2 instead of libgusb2a) and would be uninstallable there.
+#
+# Only binary packages are supported.  debian/README.source explains why a
+# source package cannot be built: the pinned libfprint and fprintd trees are
+# fetched at build time, not shipped as an orig tarball.
+
+on:
+  push:
+    branches:
+      - debian/forky
+  pull_request:
+    branches:
+      - debian/forky
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: debian-forky-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-deb:
+    name: Build .deb (Debian forky)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: debian:forky
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      # actions/checkout runs inside the container and needs git there.
+      # dpkg-dev is installed up front so that the changelog can be inspected
+      # before the (slower) build dependencies are pulled in.
+      - name: Install checkout and inspection prerequisites
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            ca-certificates \
+            git \
+            dpkg-dev
+
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Guard against the image tag being retargeted: a package built on
+      # another suite would silently get the wrong runtime dependency names.
+      - name: Verify container and changelog target the same suite
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          changelog_suite="$(dpkg-parsechangelog --show-field Distribution)"
+          echo "Container:  ${PRETTY_NAME:-unknown} (VERSION_CODENAME=${VERSION_CODENAME:-unknown})"
+          echo "Changelog:  ${changelog_suite}"
+          if [ "${VERSION_CODENAME:-}" != "${changelog_suite}" ]; then
+            echo "::error::container codename '${VERSION_CODENAME:-unknown}' does not match debian/changelog distribution '${changelog_suite}'"
+            exit 1
+          fi
+
+      # Build-Depends is read from the local debian/control; the source trees
+      # it needs (libfprint, fprintd) are fetched by debian/rules itself.
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          apt-get build-dep --yes .
+          dpkg-checkbuilddeps
+
+      - name: Build binary package
+        run: |
+          set -euo pipefail
+          dpkg-buildpackage -b -uc -us -j"$(nproc)"
+
+          # dpkg-buildpackage writes one level above the source tree (the
+          # workspace's parent directory); collect the results inside it so
+          # that upload-artifact and the checks below have stable paths.
+          mkdir -p artifacts
+          shopt -s nullglob
+          mv -v ../*.deb ../*.buildinfo ../*.changes artifacts/
+
+      - name: Inspect packages
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          # debhelper also builds an automatic -dbgsym package, so a normal
+          # build yields two .deb files: the main package and its debug
+          # symbols.  Both are named by dpkg as
+          # <package>_<version>_<arch>.deb; select the main one explicitly
+          # (the dash before dbgsym keeps the glob disjoint).
+          debs=(artifacts/*.deb)
+          mains=(artifacts/libfprint-goodix-spi_*.deb)
+          if [ "${#debs[@]}" -eq 0 ] || [ "${#mains[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one main .deb, found: ${debs[*]:-none}"
+            exit 1
+          fi
+
+          echo "I: built binary packages:"
+          printf '  %s\n' "${debs[@]##*/}"
+
+          dpkg-deb --info "${mains[0]}"
+          dpkg-deb --contents "${mains[0]}"
+
+          # The debug package is not installed by users, but its name and
+          # contents are worth recording in the log as well.
+          for dbg in artifacts/*-dbgsym_*.deb; do
+            dpkg-deb --info "$dbg"
+          done
+
+          # Checksum with bare filenames so that "sha256sum -c SHA256SUMS"
+          # works on the extracted artifact.
+          (
+            cd artifacts
+            for deb in *.deb; do
+              sha256sum "$deb"
+            done > SHA256SUMS
+            cat SHA256SUMS
+          )
+
+          . /etc/os-release
+          {
+            echo "## Debian forky packages"
+            echo
+            echo '| Package | Version | Architecture |'
+            echo '| --- | --- | --- |'
+            for deb in "${debs[@]}"; do
+              echo "| $(dpkg-deb --field "$deb" Package) | $(dpkg-deb --field "$deb" Version) | $(dpkg-deb --field "$deb" Architecture) |"
+            done
+            echo
+            echo "Built in \`${PRETTY_NAME:-Debian forky}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: libfprint-goodix-spi-forky
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
