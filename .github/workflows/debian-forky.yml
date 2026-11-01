@@ -9,6 +9,10 @@ name: Debian forky package
 # Only binary packages are supported.  debian/README.source explains why a
 # source package cannot be built: the pinned libfprint and fprintd trees are
 # fetched at build time, not shipped as an orig tarball.
+#
+# Pushes to debian/forky and manual runs also publish a prerelease tagged with
+# the built commit, with the packages as individual assets, so the binaries are
+# not limited to the artifact retention period.  Pull requests only build.
 
 on:
   push:
@@ -19,8 +23,10 @@ on:
       - debian/forky
   workflow_dispatch:
 
+# upload-artifact only needs read; publishing the release below needs write
+# access to create the tag/release and upload its assets.
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: debian-forky-${{ github.workflow }}-${{ github.ref }}
@@ -152,3 +158,58 @@ jobs:
           path: artifacts/*
           if-no-files-found: error
           retention-days: 14
+
+      - name: Prepare release assets
+        id: release-meta
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          # GitHub rewrites "~" to "." in release asset filenames.  Do the
+          # same here so that SHA256SUMS matches the filenames users actually
+          # download; the Version field inside the packages is unaffected and
+          # keeps the canonical 0.0~git...-1+forky1 form.
+          rm -rf release
+          mkdir -p release
+          for src in artifacts/*.deb artifacts/*.changes artifacts/*.buildinfo; do
+            name="${src##*/}"
+            cp -p "$src" "release/${name//\~/.}"
+          done
+
+          (
+            cd release
+            for f in *.deb *.changes *.buildinfo; do
+              sha256sum "$f"
+            done > SHA256SUMS
+            cat SHA256SUMS
+          )
+
+          echo "version=$(dpkg-parsechangelog --show-field Version)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: debian-forky-${{ github.sha }}
+          target_commitish: ${{ github.sha }}
+          name: Debian forky ${{ steps.release-meta.outputs.version }} (${{ steps.release-meta.outputs.short_sha }})
+          prerelease: true
+          make_latest: "false"
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          body: |
+            Automated `debian/forky` build of `${{ github.sha }}` in the
+            official `debian:forky` container.
+
+            The canonical package version is
+            `${{ steps.release-meta.outputs.version }}`. GitHub rewrites `~`
+            to `.` in release asset filenames, so the downloaded filenames use
+            the dot form; the `Version` field inside the `.deb` files keeps the
+            canonical version. `SHA256SUMS` covers the downloaded names.
+          files: |
+            release/*.deb
+            release/*.changes
+            release/*.buildinfo
+            release/SHA256SUMS
