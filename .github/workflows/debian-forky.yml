@@ -33,6 +33,12 @@ jobs:
     timeout-minutes: 60
     container:
       image: debian:forky
+    # Debian's /bin/sh is dash.  The steps below use bash arrays, shopt and
+    # "set -o pipefail", so select bash explicitly; it is Essential in Debian
+    # and therefore present in the base image.
+    defaults:
+      run:
+        shell: bash
     env:
       DEBIAN_FRONTEND: noninteractive
 
